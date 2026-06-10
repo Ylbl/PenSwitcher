@@ -16,7 +16,54 @@ pub struct ProcessWindow {
     pub title: String,
     pub hwnd: isize,
     pub class_name: String,
+    #[serde(default)]
+    pub exe_path: String,
+    #[serde(default)]
+    pub process_name: String,
     pub bounds: Option<RectDto>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowIdentity {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub class_name: String,
+    #[serde(default)]
+    pub exe_path: String,
+    #[serde(default)]
+    pub process_name: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiLocatorSegment {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub automation_id: String,
+    #[serde(default)]
+    pub control_type: String,
+    #[serde(default)]
+    pub class_name: String,
+    #[serde(default)]
+    pub framework_id: String,
+    #[serde(default)]
+    pub ordinal: usize,
+    #[serde(default)]
+    pub same_type_ordinal: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiLocator {
+    #[serde(default)]
+    pub window: WindowIdentity,
+    #[serde(default)]
+    pub segments: Vec<UiLocatorSegment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +122,8 @@ pub struct ShortcutItem {
     pub node: UiNode,
     #[serde(default)]
     pub ancestors: Vec<UiNode>,
+    #[serde(default)]
+    pub locator: UiLocator,
     pub hotkey: String,
     pub enabled: bool,
     pub supports_invoke: bool,

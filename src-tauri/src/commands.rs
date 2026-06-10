@@ -120,13 +120,15 @@ pub fn set_shortcut_membership(
         let id = shortcut_id(&process, &node_id);
         if checked {
             if !store.items.iter().any(|item| item.id == id) {
-                let (ancestors, supports) = uia::shortcut_node_with_ancestors(process.clone(), node_id)?;
+                let (ancestors, locator, supports) =
+                    uia::shortcut_node_with_ancestors(process.clone(), node_id)?;
                 let node = ancestors.last().cloned().unwrap();
                 store.items.push(ShortcutItem {
                     id,
                     process,
                     node,
                     ancestors,
+                    locator,
                     hotkey: String::new(),
                     enabled: false,
                     supports_invoke: supports,

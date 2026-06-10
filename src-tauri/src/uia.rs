@@ -1,5 +1,8 @@
 use crate::{
-    models::{DetailGroup, DetailRow, ProcessWindow, ShortcutItem, UiNode},
+    models::{
+        DetailGroup, DetailRow, ProcessWindow, ShortcutItem, UiLocator, UiLocatorSegment, UiNode,
+        WindowIdentity,
+    },
     utils::{
         bool_property, err, format_rect, id_depth, parent_id, prop_string, rect_to_dto, row, yes_no,
     },
@@ -10,11 +13,10 @@ use std::{
 };
 use uiautomation::{
     patterns::{
-        UIExpandCollapsePattern, UIInvokePattern, UILegacyIAccessiblePattern,
-        UIScrollItemPattern, UISelectionItemPattern, UITogglePattern,
+        UIExpandCollapsePattern, UIInvokePattern, UILegacyIAccessiblePattern, UIScrollItemPattern,
+        UISelectionItemPattern, UITogglePattern,
     },
     types::{ControlType, Handle, Point, TreeScope, UIProperty},
-    variants::Variant,
     UIAutomation, UIElement,
 };
 
@@ -156,7 +158,7 @@ pub fn element_bounds(
 pub fn shortcut_node_with_ancestors(
     process: ProcessWindow,
     node_id: String,
-) -> Result<(Vec<UiNode>, bool), String> {
+) -> Result<(Vec<UiNode>, UiLocator, bool), String> {
     with_uia(move |uia| {
         let root = element_from_process(uia, &process)?;
         let segments: Vec<&str> = node_id
@@ -165,19 +167,29 @@ pub fn shortcut_node_with_ancestors(
             .filter(|s| !s.is_empty())
             .collect();
         let mut ancestors = Vec::new();
+        let mut locator_segments = Vec::new();
         let mut current = root.clone();
 
         ancestors.push(node_from_element(uia, &current, "root".into(), None, 0));
+        locator_segments.push(locator_segment_from_element(
+            uia,
+            &current,
+            "root".into(),
+            0,
+            0,
+        ));
 
         let mut path = String::from("root");
         for segment in segments {
             let index: usize = segment.parse().map_err(|_| "无效节点路径".to_string())?;
             let children = find_child_elements(uia, &current);
-            current = children
-                .into_iter()
-                .nth(index)
+            let child = children
+                .get(index)
+                .cloned()
                 .ok_or_else(|| "节点路径已失效".to_string())?;
             path = format!("{path}/{index}");
+            let same_type_ordinal = same_type_ordinal(uia, &children, index);
+            current = child;
             ancestors.push(node_from_element(
                 uia,
                 &current,
@@ -185,199 +197,558 @@ pub fn shortcut_node_with_ancestors(
                 parent_id(&path),
                 id_depth(&path),
             ));
+            locator_segments.push(locator_segment_from_element(
+                uia,
+                &current,
+                path.clone(),
+                index,
+                same_type_ordinal,
+            ));
         }
         let supports = supports_any_action(&current);
-        Ok((ancestors, supports))
+        Ok((
+            ancestors,
+            UiLocator {
+                window: window_identity(&process),
+                segments: locator_segments,
+            },
+            supports,
+        ))
     })
 }
 
-pub fn invoke_shortcut_item(item: ShortcutItem) -> Result<(), String> {
-    with_uia(move |uia| invoke_item(uia, &item))
+pub fn invoke_shortcut_item(mut item: ShortcutItem) -> Result<(), String> {
+    let locator = effective_locator(&item);
+    let current_process = resolve_current_process(&item, &locator)?;
+    item.process = current_process;
+    with_uia(move |uia| invoke_item_with_locator(uia, &item, &locator))
 }
 
-pub fn invoke_item(uia: &UIAutomation, item: &ShortcutItem) -> Result<(), String> {
+fn invoke_item_with_locator(
+    uia: &UIAutomation,
+    item: &ShortcutItem,
+    locator: &UiLocator,
+) -> Result<(), String> {
     tracing::info!("========================================");
     tracing::info!("触发快捷键: {} → {}", item.hotkey, item.node.name);
-    tracing::info!("记录路径 ({} 层):", item.ancestors.len());
-    for (i, a) in item.ancestors.iter().enumerate() {
-        tracing::info!("  [{i}] {:<6} name={:<30} auto={:<20} ctrl={}", a.id, a.name, a.automation_id, a.control_type);
+    tracing::info!(
+        segments = locator.segments.len(),
+        hwnd = item.process.hwnd,
+        pid = item.process.process_id,
+        title = %item.process.title,
+        "开始稳定定位"
+    );
+    for (index, segment) in locator.segments.iter().enumerate() {
+        tracing::info!(
+            "  [{index}] id={} name={} auto={} ctrl={} class={} ord={} same_type={}",
+            segment.id,
+            segment.name,
+            segment.automation_id,
+            segment.control_type,
+            segment.class_name,
+            segment.ordinal,
+            segment.same_type_ordinal
+        );
     }
     tracing::info!("========================================");
 
-    if item.ancestors.is_empty() {
-        tracing::info!("无祖先路径，使用 fallback");
-        return invoke_item_fallback(uia, item);
-    }
-    let root = match element_from_process(uia, &item.process) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(%e, "找不到根窗口");
-            return Err(e);
-        }
-    };
+    let root = element_from_process(uia, &item.process)?;
     let window_root = root.clone();
     let mut current = root;
-
-    for (i, ancestor) in item.ancestors.iter().enumerate().skip(1) {
-        let is_last = i == item.ancestors.len() - 1;
-        tracing::info!("");
-        tracing::info!("--- 第 {}/{} 层 [{}] ---", i, item.ancestors.len() - 1, ancestor.id);
-        tracing::info!("    目标: name=\"{}\" auto=\"{}\" ctrl={}", ancestor.name, ancestor.automation_id, ancestor.control_type);
-
-        let mut found = find_anchored_child(uia, &current, ancestor);
-        if found.is_none() {
-            tracing::info!("    未找到目标，激活父节点后重试...");
-            let _ = try_activate(uia, &current, item);
-            found = find_anchored_child(uia, &current, ancestor);
-        }
-        if found.is_none() {
-            tracing::info!("    仍未找到，逐个激活所有子元素后重试...");
-            let children = find_child_elements(uia, &current);
-            for child in &children {
-                let _ = try_activate(uia, child, item);
-            }
-            found = find_anchored_child(uia, &current, ancestor);
-        }
-
-        match found {
-            Some(child) => {
-                if !is_last {
-                    tracing::info!("    ✓ 命中，激活该节点使子元素可见");
-                    let _ = try_activate(uia, &child, item);
-                } else {
-                    tracing::info!("    ✓ 命中，激活目标节点");
-                }
-                current = child;
-            }
-            None => {
-                tracing::warn!("    ✗ 第 {} 层中断: 在父节点 {} 个子元素中未找到目标", i, find_child_elements(uia, &current).len());
-                tracing::warn!("    当前实际子元素:");
-                for (idx, child) in find_child_elements(uia, &current).iter().enumerate() {
-                    let n = child.get_name().unwrap_or_default();
-                    let a = child.get_automation_id().unwrap_or_default();
-                    let c = child.get_control_type().map(|c| format!("{c:?}")).unwrap_or_default();
-                    tracing::warn!("      [{idx}] name=\"{n}\" auto=\"{a}\" ctrl={c}");
-                }
-                tracing::info!("    全窗口搜索 name=\"{}\" auto=\"{}\" ...", ancestor.name, ancestor.automation_id);
-                match search_descendants(uia, &window_root, ancestor, 50) {
-                    Some(found) => {
-                        let n = found.get_name().unwrap_or_default();
-                        tracing::info!("    全局搜索命中: name=\"{n}\"");
-                        if is_last {
-                            tracing::info!("    已是最后一层，直接激活");
-                            return try_activate(uia, &found, item);
-                        }
-                        tracing::info!("    非最后一层，激活后继续路径");
-                        let _ = try_activate(uia, &found, item);
-                        current = found;
-                    }
-                    None => {
-                        tracing::warn!("    全局搜索也未找到，路径中断，激活当前节点");
-                        return try_activate(uia, &current, item);
-                    }
-                }
-            }
-        }
+    let segments = locator_segments(locator, item);
+    if segments.len() <= 1 {
+        return try_activate(uia, &current, item);
     }
 
-    tracing::info!("路径全部命中，激活最终目标节点");
+    for (index, segment) in segments.iter().enumerate().skip(1) {
+        let is_last = index == segments.len() - 1;
+        tracing::info!(
+            layer = index,
+            name = %segment.name,
+            automation_id = %segment.automation_id,
+            control_type = %segment.control_type,
+            "定位下一层"
+        );
+
+        let mut found = find_best_child_by_segment(uia, &current, segment).or_else(|| {
+            if has_segment_identity(segment) {
+                tracing::warn!(layer = index, "直接子元素未命中，尝试有限深度搜索");
+                search_descendants_by_segment(uia, &current, segment, 4)
+            } else {
+                None
+            }
+        });
+
+        if found.is_none()
+            && should_activate_named_navigation(segment)
+            && activate_named_navigation_target(uia, &window_root, segment)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            tracing::info!(layer = index, name = %segment.name, "已激活同名导航入口，重试当前层");
+            found = find_best_child_by_segment(uia, &current, segment).or_else(|| {
+                if has_segment_identity(segment) {
+                    search_descendants_by_segment(uia, &current, segment, 4)
+                } else {
+                    None
+                }
+            });
+        }
+
+        let Some(found) = found else {
+            log_children(uia, &current, segment);
+            return Err(format!(
+                "定位中断: 第 {index} 层未找到 {} {}",
+                segment.control_type, segment.name
+            ));
+        };
+
+        if !is_last {
+            prepare_for_navigation(&found);
+        }
+        current = found;
+    }
+
+    tracing::info!("定位完成，激活最终目标节点");
     try_activate(uia, &current, item)
 }
 
-fn find_anchored_child(uia: &UIAutomation, parent: &UIElement, target: &UiNode) -> Option<UIElement> {
+fn effective_locator(item: &ShortcutItem) -> UiLocator {
+    if !item.locator.segments.is_empty() {
+        return item.locator.clone();
+    }
+
+    let segments = if !item.ancestors.is_empty() {
+        item.ancestors
+            .iter()
+            .map(locator_segment_from_node)
+            .collect()
+    } else {
+        vec![locator_segment_from_node(&item.node)]
+    };
+
+    UiLocator {
+        window: window_identity(&item.process),
+        segments,
+    }
+}
+
+fn locator_segments(locator: &UiLocator, item: &ShortcutItem) -> Vec<UiLocatorSegment> {
+    if !locator.segments.is_empty() {
+        locator.segments.clone()
+    } else if !item.ancestors.is_empty() {
+        item.ancestors
+            .iter()
+            .map(locator_segment_from_node)
+            .collect()
+    } else {
+        vec![locator_segment_from_node(&item.node)]
+    }
+}
+
+fn resolve_current_process(
+    item: &ShortcutItem,
+    locator: &UiLocator,
+) -> Result<ProcessWindow, String> {
+    let windows = crate::windows_api::list_windows()?;
+    let identity = if has_window_identity(&locator.window) {
+        locator.window.clone()
+    } else {
+        window_identity(&item.process)
+    };
+
+    let expected_process_name = expected_process_name(item, &identity);
+    let mut best: Option<(i32, ProcessWindow)> = None;
+    for candidate in windows {
+        if meaningful(&expected_process_name)
+            && !same_text(&expected_process_name, &candidate.process_name)
+        {
+            continue;
+        }
+        let score = score_window(&item.process, &identity, &candidate, &expected_process_name);
+        if score > 0
+            && best
+                .as_ref()
+                .map(|(best_score, _)| score > *best_score)
+                .unwrap_or(true)
+        {
+            best = Some((score, candidate));
+        }
+    }
+
+    let Some((score, candidate)) = best else {
+        return Err("没有找到匹配的目标窗口".into());
+    };
+
+    if score < 80 {
+        return Err(format!(
+            "目标窗口匹配度过低: score={score}, title={}",
+            candidate.title
+        ));
+    }
+
+    tracing::info!(
+        score,
+        old_hwnd = item.process.hwnd,
+        old_pid = item.process.process_id,
+        new_hwnd = candidate.hwnd,
+        new_pid = candidate.process_id,
+        title = %candidate.title,
+        class_name = %candidate.class_name,
+        process_name = %candidate.process_name,
+        "已解析当前目标窗口"
+    );
+    Ok(candidate)
+}
+
+fn score_window(
+    old: &ProcessWindow,
+    identity: &WindowIdentity,
+    candidate: &ProcessWindow,
+    expected_process_name: &str,
+) -> i32 {
+    if candidate.process_id == std::process::id() {
+        return 0;
+    }
+
+    let mut score = 0;
+    if old.hwnd == candidate.hwnd && old.process_id == candidate.process_id {
+        score += 220;
+    }
+    if meaningful(expected_process_name)
+        && same_text(expected_process_name, &candidate.process_name)
+    {
+        score += 180;
+    }
+    if meaningful(&identity.process_name)
+        && same_text(&identity.process_name, &candidate.process_name)
+    {
+        score += 120;
+    }
+    if meaningful(&identity.exe_path) && same_text(&identity.exe_path, &candidate.exe_path) {
+        score += 90;
+    }
+    if meaningful(&identity.class_name) && identity.class_name == candidate.class_name {
+        score += 50;
+    }
+    if meaningful(&identity.title) {
+        if identity.title == candidate.title {
+            score += 45;
+        } else if soft_text_match(&identity.title, &candidate.title) {
+            score += 25;
+        }
+    }
+    if looks_like_same_app(&identity.title, &candidate.title)
+        || looks_like_same_app(&identity.process_name, &candidate.process_name)
+    {
+        score += 25;
+    }
+    score
+}
+
+fn expected_process_name(item: &ShortcutItem, identity: &WindowIdentity) -> String {
+    if meaningful(&identity.process_name) {
+        return identity.process_name.clone();
+    }
+    if meaningful(&item.process.process_name) {
+        return item.process.process_name.clone();
+    }
+
+    let title = format!("{} {}", identity.title, item.process.title).to_lowercase();
+    if title.contains("onenote") || title.contains("one note") {
+        return "ONENOTE.EXE".into();
+    }
+    String::new()
+}
+
+fn has_window_identity(identity: &WindowIdentity) -> bool {
+    meaningful(&identity.exe_path)
+        || meaningful(&identity.process_name)
+        || meaningful(&identity.class_name)
+        || meaningful(&identity.title)
+}
+
+fn find_best_child_by_segment(
+    uia: &UIAutomation,
+    parent: &UIElement,
+    segment: &UiLocatorSegment,
+) -> Option<UIElement> {
     let children = find_child_elements(uia, parent);
-    let expected_index = target
-        .id
-        .rsplit('/')
-        .next()?
-        .parse::<usize>()
-        .ok()?;
-
-    if expected_index >= children.len() {
-        return None;
-    }
-
-    if !has_identity_info(target) {
-        return Some(children[expected_index].clone());
-    }
-
-    if element_matches(&children[expected_index], target) {
-        return Some(children[expected_index].clone());
-    }
-
-    children.into_iter().find(|c| element_matches(c, target))
+    best_match_in_children(uia, &children, segment)
 }
 
-fn has_identity_info(node: &UiNode) -> bool {
-    let name = node.name.as_str();
-    let auto = node.automation_id.as_str();
-    let has_name = !name.is_empty() && name != "Not Supported";
-    let has_auto = !auto.is_empty() && auto != "Not Supported";
-    has_name || has_auto
+fn best_match_in_children(
+    uia: &UIAutomation,
+    children: &[UIElement],
+    segment: &UiLocatorSegment,
+) -> Option<UIElement> {
+    let mut best: Option<(i32, UIElement)> = None;
+    for (index, child) in children.iter().enumerate() {
+        let same_type = same_type_ordinal(uia, children, index);
+        let score = score_element(uia, child, segment, index, same_type);
+        if score >= segment_threshold(segment)
+            && best
+                .as_ref()
+                .map(|(best_score, _)| score > *best_score)
+                .unwrap_or(true)
+        {
+            best = Some((score, child.clone()));
+        }
+    }
+    best.map(|(_, element)| element)
 }
 
-fn element_matches(element: &UIElement, node: &UiNode) -> bool {
-    let name = element.get_name().unwrap_or_default();
-    let auto_id = element.get_automation_id().unwrap_or_default();
-    if !auto_id.is_empty() && auto_id == node.automation_id {
-        return true;
-    }
-    if !name.is_empty() && name == node.name && !node.name.is_empty() && node.name != "Not Supported" {
-        return true;
-    }
-    false
-}
-
-fn search_descendants(uia: &UIAutomation, root: &UIElement, target: &UiNode, max_depth: usize) -> Option<UIElement> {
+fn search_descendants_by_segment(
+    uia: &UIAutomation,
+    root: &UIElement,
+    segment: &UiLocatorSegment,
+    max_depth: usize,
+) -> Option<UIElement> {
     if max_depth == 0 {
         return None;
     }
     let children = find_child_elements(uia, root);
-    for child in &children {
-        if element_matches(child, target) {
-            return Some(child.clone());
-        }
+    if let Some(found) = best_match_in_children(uia, &children, segment) {
+        return Some(found);
     }
     for child in &children {
-        if let Some(found) = search_descendants(uia, child, target, max_depth - 1) {
+        if let Some(found) = search_descendants_by_segment(uia, child, segment, max_depth - 1) {
             return Some(found);
         }
     }
     None
 }
 
-fn invoke_item_fallback(uia: &UIAutomation, item: &ShortcutItem) -> Result<(), String> {
-    tracing::info!(node_id = %item.node.id, node_name = %item.node.name, "=== fallback 路径解析 ===");
-    let root = match element_from_process(uia, &item.process) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(%e, "fallback 找不到根窗口");
-            return Err(e);
+fn activate_named_navigation_target(
+    uia: &UIAutomation,
+    root: &UIElement,
+    segment: &UiLocatorSegment,
+) -> bool {
+    if !meaningful(&segment.name) {
+        return false;
+    }
+
+    let mut candidates = Vec::new();
+    collect_exact_name_candidates(uia, root, &segment.name, 10, &mut candidates);
+    let mut best: Option<(i32, UIElement)> = None;
+    for candidate in candidates {
+        let score = navigation_candidate_score(&candidate, segment);
+        if score > 0
+            && best
+                .as_ref()
+                .map(|(best_score, _)| score > *best_score)
+                .unwrap_or(true)
+        {
+            best = Some((score, candidate));
         }
+    }
+
+    let Some((score, element)) = best else {
+        tracing::warn!(name = %segment.name, "未找到同名导航入口");
+        return false;
     };
-    let mut current_path = item.node.id.clone();
-    loop {
-        tracing::info!(current_path = %current_path, "fallback 尝试解析");
-        let element = match resolve_node(uia, root.clone(), &current_path) {
-            Ok(el) => {
-                let n = el.get_name().unwrap_or_default();
-                tracing::info!(current_path = %current_path, name = %n, "fallback 解析成功");
-                el
-            }
-            Err(e) => {
-                tracing::warn!(current_path = %current_path, %e, "fallback 解析失败，上溯父级");
-                if let Some(parent) = parent_id(&current_path) {
-                    current_path = parent;
-                    continue;
-                }
-                return Err("节点路径已失效，且无上级路径可回退".into());
-            }
-        };
-        return try_activate(uia, &element, item);
+
+    let control_type = element
+        .get_control_type()
+        .map(|value| format!("{value:?}"))
+        .unwrap_or_default();
+    tracing::info!(name = %segment.name, control_type, score, "激活同名导航入口");
+    activate_navigation_element(&element)
+}
+
+fn should_activate_named_navigation(segment: &UiLocatorSegment) -> bool {
+    meaningful(&segment.name)
+        && segment.control_type == "Custom"
+        && segment.class_name == "NetUIOrderedGroup"
+}
+
+fn collect_exact_name_candidates(
+    uia: &UIAutomation,
+    root: &UIElement,
+    name: &str,
+    max_depth: usize,
+    output: &mut Vec<UIElement>,
+) {
+    if max_depth == 0 {
+        return;
+    }
+    let children = find_child_elements(uia, root);
+    for child in &children {
+        if child.get_name().unwrap_or_default() == name {
+            output.push(child.clone());
+        }
+    }
+    for child in &children {
+        collect_exact_name_candidates(uia, child, name, max_depth - 1, output);
     }
 }
 
-fn try_activate(_uia: &UIAutomation, element: &UIElement, _item: &ShortcutItem) -> Result<(), String> {
+fn navigation_candidate_score(element: &UIElement, segment: &UiLocatorSegment) -> i32 {
+    let control_type = element
+        .get_control_type()
+        .map(|value| format!("{value:?}"))
+        .unwrap_or_default();
+    let class_name = element.get_classname().unwrap_or_default();
+    let mut score = 1;
+
+    match control_type.as_str() {
+        "TabItem" => score += 140,
+        "MenuItem" => score += 110,
+        "Button" | "SplitButton" => score += 80,
+        "Custom" => score += 65,
+        "Text" => score -= 40,
+        _ => score += 10,
+    }
+    if class_name.contains("NetUI") || class_name.contains("Mso") {
+        score += 35;
+    }
+    if meaningful(&segment.class_name) && class_name == segment.class_name {
+        score -= 25;
+    }
+    score
+}
+
+fn activate_navigation_element(element: &UIElement) -> bool {
+    if let Ok(pattern) = element.get_pattern::<UISelectionItemPattern>() {
+        if pattern.select().is_ok() {
+            return true;
+        }
+    }
+    if let Ok(pattern) = element.get_pattern::<UIInvokePattern>() {
+        if pattern.invoke().is_ok() {
+            return true;
+        }
+    }
+    if let Ok(pattern) = element.get_pattern::<UILegacyIAccessiblePattern>() {
+        let _ = pattern.select(3);
+        if pattern.do_default_action().is_ok() {
+            return true;
+        }
+    }
+    element.click().is_ok()
+}
+
+fn score_element(
+    uia: &UIAutomation,
+    element: &UIElement,
+    segment: &UiLocatorSegment,
+    ordinal: usize,
+    same_type_ordinal: usize,
+) -> i32 {
+    let mut score = 0;
+    let control_type = prop_string(|| element.get_control_type().map(|v| format!("{v:?}")));
+    let name = prop_string(|| element.get_name());
+    let automation_id = prop_string(|| element.get_automation_id());
+    let class_name = prop_string(|| element.get_classname());
+    let framework_id = prop_string(|| element.get_framework_id());
+
+    if meaningful(&segment.automation_id) && automation_id != segment.automation_id {
+        return -200;
+    }
+    if meaningful(&segment.name) && !soft_text_match(&name, &segment.name) {
+        return -160;
+    }
+    if meaningful(&segment.control_type) && control_type != segment.control_type {
+        return -120;
+    }
+
+    if meaningful(&segment.automation_id) {
+        if automation_id == segment.automation_id {
+            score += 120;
+        }
+    }
+    if meaningful(&segment.name) {
+        if name == segment.name {
+            score += 90;
+        } else if soft_text_match(&name, &segment.name) {
+            score += 35;
+        }
+    }
+    if meaningful(&segment.control_type) {
+        if control_type == segment.control_type {
+            score += 40;
+        }
+    }
+    if meaningful(&segment.class_name) && class_name == segment.class_name {
+        score += 25;
+    }
+    if meaningful(&segment.framework_id) && framework_id == segment.framework_id {
+        score += 15;
+    }
+    if ordinal == segment.ordinal {
+        score += 8;
+    }
+    if same_type_ordinal == segment.same_type_ordinal {
+        score += 18;
+    }
+
+    tracing::trace!(
+        score,
+        ordinal,
+        same_type_ordinal,
+        target_name = %segment.name,
+        name = %name,
+        target_type = %segment.control_type,
+        control_type = %control_type,
+        "UIA 子元素匹配评分"
+    );
+    let _ = uia;
+    score
+}
+
+fn segment_threshold(segment: &UiLocatorSegment) -> i32 {
+    if meaningful(&segment.automation_id) {
+        90
+    } else if meaningful(&segment.name) {
+        70
+    } else {
+        45
+    }
+}
+
+fn has_segment_identity(segment: &UiLocatorSegment) -> bool {
+    meaningful(&segment.automation_id) || meaningful(&segment.name)
+}
+
+fn prepare_for_navigation(element: &UIElement) {
+    if let Ok(pattern) = element.get_pattern::<UIScrollItemPattern>() {
+        let _ = pattern.scroll_into_view();
+    }
+    if let Ok(pattern) = element.get_pattern::<UISelectionItemPattern>() {
+        let _ = pattern.select();
+    }
+    if let Ok(pattern) = element.get_pattern::<UIExpandCollapsePattern>() {
+        let _ = pattern.expand();
+    }
+    if let Ok(pattern) = element.get_pattern::<UILegacyIAccessiblePattern>() {
+        let _ = pattern.select(3);
+    }
+}
+
+fn log_children(uia: &UIAutomation, parent: &UIElement, target: &UiLocatorSegment) {
+    let children = find_child_elements(uia, parent);
+    tracing::warn!(
+        child_count = children.len(),
+        target_name = %target.name,
+        target_auto = %target.automation_id,
+        target_type = %target.control_type,
+        "定位失败，输出当前父节点子元素"
+    );
+    for (index, child) in children.iter().enumerate().take(80) {
+        let name = child.get_name().unwrap_or_default();
+        let automation_id = child.get_automation_id().unwrap_or_default();
+        let control_type = child
+            .get_control_type()
+            .map(|v| format!("{v:?}"))
+            .unwrap_or_default();
+        tracing::warn!(index, name, automation_id, control_type, "候选子元素");
+    }
+}
+
+fn try_activate(
+    _uia: &UIAutomation,
+    element: &UIElement,
+    _item: &ShortcutItem,
+) -> Result<(), String> {
     if let Ok(pattern) = element.get_pattern::<UIScrollItemPattern>() {
         let _ = pattern.scroll_into_view();
     }
@@ -395,7 +766,9 @@ fn try_activate(_uia: &UIAutomation, element: &UIElement, _item: &ShortcutItem) 
     }
     if let Ok(pattern) = element.get_pattern::<UILegacyIAccessiblePattern>() {
         let _ = pattern.select(3);
-        return pattern.do_default_action().map_err(|e| format!("DoDefaultAction: {e}"));
+        return pattern
+            .do_default_action()
+            .map_err(|e| format!("DoDefaultAction: {e}"));
     }
     if element.click().is_ok() {
         return Ok(());
@@ -436,40 +809,69 @@ pub fn picked_payload(
 
 fn element_from_process(uia: &UIAutomation, process: &ProcessWindow) -> Result<UIElement, String> {
     tracing::debug!(hwnd = process.hwnd, pid = process.process_id, title = %process.title, "查找窗口元素");
+    if let Some(element) = element_from_exact_process(uia, process) {
+        return Ok(element);
+    }
+
+    tracing::error!(
+        hwnd = process.hwnd,
+        pid = process.process_id,
+        "未找到窗口元素"
+    );
+    Err(format!("未找到当前 HWND {} 对应的窗口元素", process.hwnd))
+}
+
+fn element_from_exact_process(uia: &UIAutomation, process: &ProcessWindow) -> Option<UIElement> {
     if let Ok(element) = uia.element_from_handle(Handle::from(process.hwnd)) {
         if element.get_process_id().unwrap_or_default() == process.process_id {
             let children = find_child_elements(uia, &element);
             if !children.is_empty() {
-                tracing::debug!(hwnd = process.hwnd, children = children.len(), "通过 HWND 找到窗口元素");
-                return Ok(element);
+                tracing::debug!(
+                    hwnd = process.hwnd,
+                    children = children.len(),
+                    "通过 HWND 找到窗口元素"
+                );
+                return Some(element);
             }
             tracing::debug!(hwnd = process.hwnd, "HWND 匹配但无子元素，回退搜索");
         }
     }
-    tracing::debug!(pid = process.process_id, "HWND 未匹配，遍历桌面根子元素");
-    let root = uia.get_root_element().map_err(err)?;
-    let condition = uia
-        .create_property_condition(
-            UIProperty::ProcessId,
-            Variant::from(process.process_id as i32),
-            None,
-        )
-        .map_err(err)?;
-    let elements = root
-        .find_all(TreeScope::Children, &condition)
-        .map_err(err)?;
-    tracing::debug!(count = elements.len(), "按 PID 找到窗口数");
-    for element in elements {
-        if let Ok(hwnd_val) = element.get_native_window_handle() {
-            let raw: windows::Win32::Foundation::HWND = hwnd_val.into();
-            if raw.0 as isize == process.hwnd {
-                tracing::debug!("PID+HWND 匹配成功");
-                return Ok(element);
-            }
-        }
-    }
-    tracing::error!(hwnd = process.hwnd, pid = process.process_id, "未找到窗口元素");
-    Err(format!("未找到 HWND {} 对应的窗口元素", process.hwnd))
+
+    tracing::debug!(
+        hwnd = process.hwnd,
+        pid = process.process_id,
+        "旧 HWND/PID 未命中，跳过旧 PID UIA 扫描"
+    );
+    None
+}
+
+fn looks_like_same_app(old: &str, current: &str) -> bool {
+    let old = normalize_title(old);
+    let current = normalize_title(current);
+    ["onenote", "one note"]
+        .iter()
+        .any(|needle| old.contains(needle) && current.contains(needle))
+}
+
+fn normalize_title(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn meaningful(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value != "Not Supported"
+}
+
+fn same_text(left: &str, right: &str) -> bool {
+    meaningful(left) && meaningful(right) && left.eq_ignore_ascii_case(right)
+}
+
+fn soft_text_match(left: &str, right: &str) -> bool {
+    let left = normalize_title(left);
+    let right = normalize_title(right);
+    meaningful(&left)
+        && meaningful(&right)
+        && (left == right || left.contains(&right) || right.contains(&left))
 }
 
 fn find_child_elements(uia: &UIAutomation, parent: &UIElement) -> Vec<UIElement> {
@@ -522,6 +924,66 @@ fn node_from_element(
         bounds: element.get_bounding_rectangle().ok().map(rect_to_dto),
         depth,
         has_children: !children.is_empty(),
+    }
+}
+
+fn locator_segment_from_element(
+    _uia: &UIAutomation,
+    element: &UIElement,
+    id: String,
+    ordinal: usize,
+    same_type_ordinal: usize,
+) -> UiLocatorSegment {
+    UiLocatorSegment {
+        id,
+        name: prop_string(|| element.get_name()),
+        automation_id: prop_string(|| element.get_automation_id()),
+        control_type: prop_string(|| element.get_control_type().map(|v| format!("{v:?}"))),
+        class_name: prop_string(|| element.get_classname()),
+        framework_id: prop_string(|| element.get_framework_id()),
+        ordinal,
+        same_type_ordinal,
+    }
+}
+
+fn locator_segment_from_node(node: &UiNode) -> UiLocatorSegment {
+    UiLocatorSegment {
+        id: node.id.clone(),
+        name: node.name.clone(),
+        automation_id: node.automation_id.clone(),
+        control_type: node.control_type.clone(),
+        class_name: node.class_name.clone(),
+        framework_id: node.framework_id.clone(),
+        ordinal: node
+            .id
+            .rsplit('/')
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_default(),
+        same_type_ordinal: 0,
+    }
+}
+
+fn same_type_ordinal(_uia: &UIAutomation, siblings: &[UIElement], index: usize) -> usize {
+    let Some(target) = siblings.get(index) else {
+        return 0;
+    };
+    let target_type = prop_string(|| target.get_control_type().map(|v| format!("{v:?}")));
+    siblings
+        .iter()
+        .take(index)
+        .filter(|sibling| {
+            prop_string(|| sibling.get_control_type().map(|v| format!("{v:?}"))) == target_type
+        })
+        .count()
+}
+
+fn window_identity(process: &ProcessWindow) -> WindowIdentity {
+    WindowIdentity {
+        title: process.title.clone(),
+        class_name: process.class_name.clone(),
+        exe_path: process.exe_path.clone(),
+        process_name: process.process_name.clone(),
     }
 }
 

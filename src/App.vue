@@ -32,7 +32,32 @@ interface ProcessWindow {
   title: string;
   hwnd: number;
   className: string;
+  exePath?: string;
+  processName?: string;
   bounds?: Rect | null;
+}
+
+interface WindowIdentity {
+  title: string;
+  className: string;
+  exePath: string;
+  processName: string;
+}
+
+interface UiLocatorSegment {
+  id: string;
+  name: string;
+  automationId: string;
+  controlType: string;
+  className: string;
+  frameworkId: string;
+  ordinal: number;
+  sameTypeOrdinal: number;
+}
+
+interface UiLocator {
+  window: WindowIdentity;
+  segments: UiLocatorSegment[];
 }
 
 interface UiNode {
@@ -75,6 +100,7 @@ interface ShortcutItem {
   process: ProcessWindow;
   node: UiNode;
   ancestors: UiNode[];
+  locator?: UiLocator;
   hotkey: string;
   enabled: boolean;
   supportsInvoke: boolean;
@@ -132,7 +158,6 @@ const currentShortcutChecked = computed(() => {
   if (!selectedProcess.value || !selectedNode.value) return false;
   return selectedShortcutIds.value.has(shortcutKey(selectedProcess.value, selectedNode.value));
 });
-const currentSupportsInvoke = computed(() => details.value?.supportsInvoke ?? false);
 
 onMounted(async () => {
   await Promise.all([refreshProcesses(), refreshShortcuts()]);
@@ -157,7 +182,7 @@ onUnmounted(() => {
   unlistenHotkey?.();
 });
 
-watch(view, (next, prev) => {
+watch(view, (_next, prev) => {
   if (prev === "inspector") {
     pickActive.value = false;
     void invoke("cancel_element_pick");
@@ -376,24 +401,6 @@ function captureHotkey(event: KeyboardEvent, item: ShortcutItem) {
 
 async function saveHotkeyBlur(item: ShortcutItem) {
   await saveHotkey(item);
-}
-
-function normalizeKey(event: KeyboardEvent) {
-  const code = event.code;
-  if (!code || code === "Unidentified") {
-    return "";
-  }
-  const parts: string[] = [];
-  const modifierCodes = new Set(["ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight"]);
-  const isModifierKey = modifierCodes.has(code);
-  if (!isModifierKey) {
-    if (event.ctrlKey) parts.push("Ctrl");
-    if (event.altKey) parts.push("Alt");
-    if (event.shiftKey) parts.push("Shift");
-    if (event.metaKey) parts.push("Meta");
-  }
-  parts.push(code);
-  return parts.join("+");
 }
 
 function displayHotkey(value: string) {

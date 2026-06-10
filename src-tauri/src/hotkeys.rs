@@ -1,9 +1,5 @@
 use crate::{
-    models::ShortcutItem,
-    state::AppState,
-    uia::{automation, invoke_item},
-    utils::lock_err,
-    HOTKEY_EVENT,
+    models::ShortcutItem, state::AppState, uia::invoke_shortcut_item, utils::lock_err, HOTKEY_EVENT,
 };
 use rdev::{listen, Event, EventType, Key};
 use std::collections::HashMap;
@@ -88,35 +84,33 @@ pub fn start_listener(app: AppHandle, sequences: Arc<Mutex<HashMap<String, Hotke
         let mut sequence_modifiers: Vec<Key> = Vec::new();
         let mut key_buffer: Vec<Key> = Vec::new();
 
-        if let Err(error) = listen(move |event: Event| {
-            match event.event_type {
-                EventType::KeyPress(key) => {
-                    if is_modifier(&key) {
-                        if !active_modifiers.contains(&key) {
-                            active_modifiers.push(key);
-                        }
-                        if key_buffer.is_empty() {
-                            sequence_modifiers = active_modifiers.clone();
-                        }
-                    } else if !active_modifiers.is_empty() {
-                        if key_buffer.is_empty() {
-                            sequence_modifiers = active_modifiers.clone();
-                        }
-                        key_buffer.push(key);
+        if let Err(error) = listen(move |event: Event| match event.event_type {
+            EventType::KeyPress(key) => {
+                if is_modifier(&key) {
+                    if !active_modifiers.contains(&key) {
+                        active_modifiers.push(key);
                     }
-                }
-                EventType::KeyRelease(key) => {
-                    if is_modifier(&key) {
-                        active_modifiers.retain(|k| k != &key);
-                        if active_modifiers.is_empty() && !key_buffer.is_empty() {
-                            let buffer = std::mem::take(&mut key_buffer);
-                            check_sequences(&app, &sequences, &sequence_modifiers, &buffer);
-                            sequence_modifiers.clear();
-                        }
+                    if key_buffer.is_empty() {
+                        sequence_modifiers = active_modifiers.clone();
                     }
+                } else if !active_modifiers.is_empty() {
+                    if key_buffer.is_empty() {
+                        sequence_modifiers = active_modifiers.clone();
+                    }
+                    key_buffer.push(key);
                 }
-                _ => {}
             }
+            EventType::KeyRelease(key) => {
+                if is_modifier(&key) {
+                    active_modifiers.retain(|k| k != &key);
+                    if active_modifiers.is_empty() && !key_buffer.is_empty() {
+                        let buffer = std::mem::take(&mut key_buffer);
+                        check_sequences(&app, &sequences, &sequence_modifiers, &buffer);
+                        sequence_modifiers.clear();
+                    }
+                }
+            }
+            _ => {}
         }) {
             tracing::error!(?error, "全局键盘监听失败");
         }
@@ -182,7 +176,7 @@ fn handle_match(app: &AppHandle, item_id: &str) {
 
     if let Some(item) = item {
         tracing::info!(item_id, node_name = %item.node.name, hotkey = %item.hotkey, "开始调用 invoke_item");
-        match automation().and_then(|uia| invoke_item(&uia, &item)) {
+        match invoke_shortcut_item(item.clone()) {
             Ok(_) => {
                 tracing::info!(item_id, "快捷键执行成功");
                 let _ = app.emit(HOTKEY_EVENT, item);

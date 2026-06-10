@@ -5,9 +5,13 @@ use crate::{
 use std::collections::HashSet;
 use uiautomation::types::Rect;
 use windows::{
-    core::BOOL,
+    core::{BOOL, PWSTR},
     Win32::{
-        Foundation::{HWND, LPARAM, POINT, RECT},
+        Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT},
+        System::Threading::{
+            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        },
         UI::WindowsAndMessaging::{
             EnumWindows, GetAncestor, GetClassNameW, GetCursorPos, GetWindow, GetWindowRect,
             GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
@@ -97,13 +101,41 @@ fn process_from_hwnd(hwnd: HWND, process_id: u32) -> ProcessWindow {
         let bounds = GetWindowRect(hwnd, &mut rect)
             .ok()
             .map(|_| rect_to_dto(Rect::from(rect)));
+        let exe_path = process_image_path(process_id).unwrap_or_default();
+        let process_name = process_name_from_path(&exe_path);
 
         ProcessWindow {
             process_id,
             title,
             hwnd: hwnd.0 as isize,
             class_name,
+            exe_path,
+            process_name,
             bounds,
         }
     }
+}
+
+fn process_image_path(process_id: u32) -> Option<String> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id).ok()?;
+        let mut size = 32768u32;
+        let mut buffer = vec![0u16; size as usize];
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut size,
+        );
+        let _ = CloseHandle(handle);
+        result.ok()?;
+        Some(String::from_utf16_lossy(&buffer[..size as usize]))
+    }
+}
+
+fn process_name_from_path(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
 }
