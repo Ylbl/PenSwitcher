@@ -283,15 +283,8 @@ fn invoke_item_with_locator(
             && should_activate_named_navigation(segment)
             && activate_named_navigation_target(uia, &window_root, segment)
         {
-            std::thread::sleep(std::time::Duration::from_millis(120));
-            tracing::info!(layer = index, name = %segment.name, "已激活同名导航入口，重试当前层");
-            found = find_best_child_by_segment(uia, &current, segment).or_else(|| {
-                if has_segment_identity(segment) {
-                    search_descendants_by_segment(uia, &current, segment, 4)
-                } else {
-                    None
-                }
-            });
+            tracing::info!(layer = index, name = %segment.name, "已激活同名导航入口，短轮询重试当前层");
+            found = wait_for_segment_after_navigation(uia, &current, segment);
         }
 
         let Some(found) = found else {
@@ -553,6 +546,31 @@ fn activate_named_navigation_target(
         .unwrap_or_default();
     tracing::info!(name = %segment.name, control_type, score, "激活同名导航入口");
     activate_navigation_element(&element)
+}
+
+fn wait_for_segment_after_navigation(
+    uia: &UIAutomation,
+    parent: &UIElement,
+    segment: &UiLocatorSegment,
+) -> Option<UIElement> {
+    const MAX_WAIT_MS: u64 = 60;
+    const STEP_MS: u64 = 5;
+
+    let mut elapsed = 0;
+    loop {
+        let found = find_best_child_by_segment(uia, parent, segment).or_else(|| {
+            if has_segment_identity(segment) {
+                search_descendants_by_segment(uia, parent, segment, 4)
+            } else {
+                None
+            }
+        });
+        if found.is_some() || elapsed >= MAX_WAIT_MS {
+            return found;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(STEP_MS));
+        elapsed += STEP_MS;
+    }
 }
 
 fn should_activate_named_navigation(segment: &UiLocatorSegment) -> bool {
