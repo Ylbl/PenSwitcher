@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
@@ -152,6 +152,14 @@ onUnmounted(() => {
   void invoke("hide_overlay");
   unlistenPicked?.();
   unlistenHotkey?.();
+});
+
+watch(view, (next, prev) => {
+  if (prev === "inspector") {
+    elementPickActive.value = false;
+    void invoke("cancel_element_pick");
+    void invoke("hide_overlay");
+  }
 });
 
 async function refreshProcesses() {
@@ -627,16 +635,15 @@ function displayHotkeyPart(part: string) {
         </button>
       </div>
       <div class="h-[calc(100%-2.75rem)] overflow-auto p-3">
-        <div class="grid grid-cols-[1fr_220px_130px_110px] border border-[#454b54] bg-[#202327] text-xs font-semibold text-slate-300">
+        <div class="grid grid-cols-[1fr_220px_110px] border border-[#454b54] bg-[#202327] text-xs font-semibold text-slate-300">
           <div class="px-3 py-2">元素</div>
           <div class="px-3 py-2">快捷键</div>
-          <div class="px-3 py-2">状态</div>
           <div class="px-3 py-2 text-right">操作</div>
         </div>
         <div
           v-for="item in shortcuts"
           :key="item.id"
-          class="grid grid-cols-[1fr_220px_130px_110px] items-center border-x border-b border-[#454b54] bg-[#24272b] text-xs"
+          class="grid grid-cols-[1fr_220px_110px] items-center border-x border-b border-[#454b54] bg-[#24272b] text-xs"
         >
           <div class="min-w-0 px-3 py-2">
             <div class="truncate text-slate-100">{{ nodeLabel(item.node) }}</div>
@@ -651,9 +658,6 @@ function displayHotkeyPart(part: string) {
               @keydown="captureHotkey($event, item)"
               @paste.prevent
             />
-          </div>
-          <div class="px-3 py-2" :class="item.supportsInvoke ? 'text-emerald-300' : 'text-amber-300'">
-            {{ item.status }}
           </div>
           <div class="flex justify-end gap-1 px-3 py-2">
             <button class="small-button" :disabled="!item.supportsInvoke" @click="invokeShortcut(item)">
