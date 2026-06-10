@@ -120,14 +120,13 @@ pub fn set_shortcut_membership(
         let id = shortcut_id(&process, &node_id);
         if checked {
             if !store.items.iter().any(|item| item.id == id) {
-                let (node, supports) = uia::shortcut_node(process.clone(), node_id)?;
-                if !supports {
-                    return Err("当前元素无法 Invoke，不能加入快捷操作".into());
-                }
+                let (ancestors, supports) = uia::shortcut_node_with_ancestors(process.clone(), node_id)?;
+                let node = ancestors.last().cloned().unwrap();
                 store.items.push(ShortcutItem {
                     id,
                     process,
                     node,
+                    ancestors,
                     hotkey: String::new(),
                     enabled: false,
                     supports_invoke: supports,
@@ -196,6 +195,7 @@ pub fn set_shortcut_hotkey(
 
 #[tauri::command]
 pub fn invoke_shortcut(state: tauri::State<AppState>, item_id: String) -> Result<(), String> {
+    tracing::info!(%item_id, "invoke_shortcut 命令");
     let item = state
         .shortcuts
         .lock()
@@ -205,5 +205,12 @@ pub fn invoke_shortcut(state: tauri::State<AppState>, item_id: String) -> Result
         .find(|item| item.id == item_id)
         .cloned()
         .ok_or_else(|| "快捷操作不存在".to_string())?;
+    tracing::info!(
+        %item_id,
+        node_name = %item.node.name,
+        node_id = %item.node.id,
+        ancestors_len = item.ancestors.len(),
+        "开始调用 invoke_shortcut_item"
+    );
     uia::invoke_shortcut_item(item)
 }

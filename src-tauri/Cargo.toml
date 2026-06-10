@@ -22,7 +22,7 @@ once_cell = "1"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-uiautomation = { version = "0.25", features = ["process"] }
+uiautomation = { version = "0.25", features = ["process", "input"] }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",

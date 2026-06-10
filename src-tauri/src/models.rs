@@ -73,6 +73,8 @@ pub struct ShortcutItem {
     pub id: String,
     pub process: ProcessWindow,
     pub node: UiNode,
+    #[serde(default)]
+    pub ancestors: Vec<UiNode>,
     pub hotkey: String,
     pub enabled: bool,
     pub supports_invoke: bool,

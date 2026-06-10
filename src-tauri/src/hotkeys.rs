@@ -167,6 +167,7 @@ fn key_match(a: &Key, b: &Key) -> bool {
 }
 
 fn handle_match(app: &AppHandle, item_id: &str) {
+    tracing::info!(item_id, "快捷键匹配成功，准备执行");
     let state = app.state::<AppState>();
     let item: Option<ShortcutItem> = {
         let store = match state.shortcuts.lock() {
@@ -180,14 +181,18 @@ fn handle_match(app: &AppHandle, item_id: &str) {
     };
 
     if let Some(item) = item {
+        tracing::info!(item_id, node_name = %item.node.name, hotkey = %item.hotkey, "开始调用 invoke_item");
         match automation().and_then(|uia| invoke_item(&uia, &item)) {
             Ok(_) => {
+                tracing::info!(item_id, "快捷键执行成功");
                 let _ = app.emit(HOTKEY_EVENT, item);
             }
             Err(error) => {
-                tracing::error!(%error, "快捷键 Invoke 失败");
+                tracing::error!(item_id, %error, "快捷键 Invoke 失败");
             }
         }
+    } else {
+        tracing::warn!(item_id, "未找到对应的 ShortcutItem");
     }
 }
 

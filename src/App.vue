@@ -76,6 +76,7 @@ interface ShortcutItem {
   id: string;
   process: ProcessWindow;
   node: UiNode;
+  ancestors: UiNode[];
   hotkey: string;
   enabled: boolean;
   supportsInvoke: boolean;
@@ -228,10 +229,6 @@ async function selectNode(node: UiNode, drawOverlay = true) {
 
 async function toggleShortcut(checked: boolean) {
   if (!selectedProcess.value || !selectedNode.value) return;
-  if (checked && !currentSupportsInvoke.value) {
-    status.value = "当前元素无法 Invoke，不能加入快捷操作";
-    return;
-  }
   shortcuts.value = await invoke<ShortcutItem[]>("set_shortcut_membership", {
     process: selectedProcess.value,
     nodeId: selectedNode.value.id,
@@ -622,10 +619,10 @@ function displayHotkeyPart(part: string) {
                   type="checkbox"
                   class="h-4 w-4 accent-sky-500"
                   :checked="currentShortcutChecked"
-                  :disabled="!selectedNode || !currentSupportsInvoke"
+                  :disabled="!selectedNode"
                   @change="toggleShortcut(($event.target as HTMLInputElement).checked)"
                 />
-                {{ currentSupportsInvoke ? "加入快捷操作" : "无法 Invoke" }}
+                加入快捷操作
               </label>
               <button class="toolbar-button h-7 w-7" title="查看快捷操作" @click="view = 'shortcuts'; refreshShortcuts()">
                 <Zap :size="15" />
@@ -688,7 +685,7 @@ function displayHotkeyPart(part: string) {
           </div>
           <div class="px-3 py-2 text-emerald-300">{{ triggeredItem === item.id ? "触发" : item.status }}</div>
           <div class="flex justify-end gap-1 px-3 py-2">
-            <button class="small-button" :disabled="!item.supportsInvoke" @click="invokeShortcut(item)">
+            <button class="small-button" @click="invokeShortcut(item)">
               <BadgePlus :size="14" />
             </button>
             <button class="small-button" @click="removeShortcut(item)">删除</button>
