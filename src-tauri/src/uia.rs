@@ -9,7 +9,10 @@ use std::{
     thread,
 };
 use uiautomation::{
-    patterns::{UIExpandCollapsePattern, UIInvokePattern, UILegacyIAccessiblePattern, UISelectionItemPattern, UITogglePattern},
+    patterns::{
+        UIExpandCollapsePattern, UIInvokePattern, UILegacyIAccessiblePattern,
+        UIScrollItemPattern, UISelectionItemPattern, UITogglePattern,
+    },
     types::{ControlType, Handle, Point, TreeScope, UIProperty},
     variants::Variant,
     UIAutomation, UIElement,
@@ -130,7 +133,7 @@ pub fn element_details(
             parent_id(&node_id),
             id_depth(&node_id),
         );
-        let supports = supports_invoke(&element);
+        let supports = supports_any_action(&element);
         let groups = build_details(&element);
         Ok((node, groups, supports))
     })
@@ -183,7 +186,7 @@ pub fn shortcut_node_with_ancestors(
                 id_depth(&path),
             ));
         }
-        let supports = supports_invoke(&current);
+        let supports = supports_any_action(&current);
         Ok((ancestors, supports))
     })
 }
@@ -375,6 +378,9 @@ fn invoke_item_fallback(uia: &UIAutomation, item: &ShortcutItem) -> Result<(), S
 }
 
 fn try_activate(_uia: &UIAutomation, element: &UIElement, _item: &ShortcutItem) -> Result<(), String> {
+    if let Ok(pattern) = element.get_pattern::<UIScrollItemPattern>() {
+        let _ = pattern.scroll_into_view();
+    }
     if let Ok(pattern) = element.get_pattern::<UISelectionItemPattern>() {
         return pattern.select().map_err(|e| format!("Select: {e}"));
     }
@@ -388,6 +394,7 @@ fn try_activate(_uia: &UIAutomation, element: &UIElement, _item: &ShortcutItem) 
         return pattern.expand().map_err(|e| format!("Expand: {e}"));
     }
     if let Ok(pattern) = element.get_pattern::<UILegacyIAccessiblePattern>() {
+        let _ = pattern.select(3);
         return pattern.do_default_action().map_err(|e| format!("DoDefaultAction: {e}"));
     }
     if element.click().is_ok() {
@@ -570,7 +577,7 @@ fn build_details(element: &UIElement) -> Vec<DetailGroup> {
         },
     ];
 
-    let mut pattern_rows = vec![row("Invoke", yes_no(supports_invoke(element)))];
+    let mut pattern_rows = vec![row("Invoke", yes_no(supports_any_action(element)))];
     for (name, prop) in [
         ("Value", UIProperty::IsValuePatternAvailable),
         ("SelectionItem", UIProperty::IsSelectionItemPatternAvailable),
@@ -587,7 +594,7 @@ fn build_details(element: &UIElement) -> Vec<DetailGroup> {
         title: "Pattern Support".into(),
         rows: pattern_rows,
     });
-    if supports_invoke(element) {
+    if element.get_pattern::<UIInvokePattern>().is_ok() {
         groups.push(DetailGroup {
             title: "Invoke".into(),
             rows: vec![DetailRow {
@@ -600,11 +607,12 @@ fn build_details(element: &UIElement) -> Vec<DetailGroup> {
     groups
 }
 
-fn supports_invoke(element: &UIElement) -> bool {
-    element
-        .get_pattern::<UIInvokePattern>()
-        .map(|_| true)
-        .unwrap_or(false)
+fn supports_any_action(element: &UIElement) -> bool {
+    element.get_pattern::<UISelectionItemPattern>().is_ok()
+        || element.get_pattern::<UIInvokePattern>().is_ok()
+        || element.get_pattern::<UITogglePattern>().is_ok()
+        || element.get_pattern::<UIExpandCollapsePattern>().is_ok()
+        || element.get_pattern::<UILegacyIAccessiblePattern>().is_ok()
 }
 
 fn build_path_from_ancestors(
