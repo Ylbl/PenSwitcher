@@ -11,7 +11,6 @@ import {
   FolderOpen,
   Keyboard,
   Layers,
-  LocateFixed,
   MousePointerClick,
   RefreshCw,
   Search,
@@ -20,7 +19,6 @@ import {
 } from "@lucide/vue";
 
 type ViewName = "processes" | "inspector" | "shortcuts";
-type InspectMode = "target-click" | "tree-click";
 
 interface Rect {
   x: number;
@@ -91,7 +89,6 @@ interface PickedElementPayload {
 
 const view = ref<ViewName>("processes");
 const dragBtn = ref<HTMLButtonElement | null>(null);
-const mode = ref<InspectMode>("tree-click");
 const status = ref("待命");
 const processFilter = ref("");
 const processes = ref<ProcessWindow[]>([]);
@@ -115,7 +112,7 @@ const visibleNodes = computed(() => {
 const details = ref<ElementDetails | null>(null);
 const shortcuts = ref<ShortcutItem[]>([]);
 const pickingWindow = ref(false);
-const elementPickActive = ref(false);
+const pickActive = ref(false);
 const hotkeyDraft = reactive<Record<string, string>>({});
 let windowPickTimer = 0;
 let unlistenPicked: UnlistenFn | null = null;
@@ -162,7 +159,7 @@ onUnmounted(() => {
 
 watch(view, (next, prev) => {
   if (prev === "inspector") {
-    elementPickActive.value = false;
+    pickActive.value = false;
     void invoke("cancel_element_pick");
     void invoke("hide_overlay");
   }
@@ -222,7 +219,7 @@ async function selectNode(node: UiNode, drawOverlay = true) {
     process: selectedProcess.value,
     nodeId: node.id,
   });
-  if (drawOverlay && mode.value === "tree-click") {
+  if (drawOverlay) {
     await invoke("highlight_element", { process: selectedProcess.value, nodeId: node.id });
   }
 }
@@ -262,21 +259,16 @@ async function invokeShortcut(item: ShortcutItem) {
   await refreshShortcuts();
 }
 
-async function switchMode(next: InspectMode) {
-  mode.value = next;
-  if (next === "target-click") {
-    elementPickActive.value = true;
-    if (selectedProcess.value) {
-      await invoke("start_element_pick", { process: selectedProcess.value });
-      status.value = "点击目标软件以定位 UIA 元素";
-    }
-  } else {
-    elementPickActive.value = false;
+async function togglePick() {
+  if (!selectedProcess.value) return;
+  if (pickActive.value) {
+    pickActive.value = false;
     await invoke("cancel_element_pick");
-    if (selectedProcess.value && selectedNode.value) {
-      await invoke("highlight_element", { process: selectedProcess.value, nodeId: selectedNode.value.id });
-    }
-    status.value = "点击 UIA 树节点以高亮目标元素";
+    status.value = "待命";
+  } else {
+    pickActive.value = true;
+    await invoke("start_element_pick", { process: selectedProcess.value });
+    status.value = "点击目标软件以定位 UIA 元素";
   }
 }
 
@@ -567,21 +559,12 @@ function displayHotkeyPart(part: string) {
         <div class="mx-1 h-6 w-px bg-[#444a52]"></div>
         <button
           class="mode-button"
-          :class="mode === 'target-click' ? 'mode-active' : ''"
-          title="点击目标软件"
-          @click="switchMode('target-click')"
+          :class="pickActive ? 'mode-active' : ''"
+          title="选择"
+          @click="togglePick"
         >
           <MousePointerClick :size="16" />
-          点击目标软件
-        </button>
-        <button
-          class="mode-button"
-          :class="mode === 'tree-click' ? 'mode-active' : ''"
-          title="点击 UIA 树"
-          @click="switchMode('tree-click')"
-        >
-          <LocateFixed :size="16" />
-          点击UIA树
+          选择
         </button>
         <div class="ml-auto truncate text-xs text-slate-400">
           {{ selectedProcess?.title }}
