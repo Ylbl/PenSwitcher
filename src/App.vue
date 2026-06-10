@@ -91,7 +91,7 @@ interface PickedElementPayload {
 const view = ref<ViewName>("processes");
 const dragBtn = ref<HTMLButtonElement | null>(null);
 const mode = ref<InspectMode>("tree-click");
-const status = ref("就绪");
+const status = ref("待命");
 const processFilter = ref("");
 const processes = ref<ProcessWindow[]>([]);
 const selectedProcess = ref<ProcessWindow | null>(null);
@@ -119,6 +119,7 @@ const hotkeyDraft = reactive<Record<string, string>>({});
 let windowPickTimer = 0;
 let unlistenPicked: UnlistenFn | null = null;
 let unlistenHotkey: UnlistenFn | null = null;
+const triggeredItem = ref("");
 
 const filteredProcesses = computed(() => {
   const q = processFilter.value.trim().toLowerCase();
@@ -141,8 +142,12 @@ onMounted(async () => {
     await acceptPickedElement(event.payload);
   });
   unlistenHotkey = await listen<ShortcutItem>("shortcut-invoked", async (event) => {
-    status.value = `已触发 ${nodeLabel(event.payload.node)}`;
+    status.value = "触发";
+    triggeredItem.value = event.payload.id;
     await refreshShortcuts();
+    setTimeout(() => {
+      triggeredItem.value = "";
+    }, 1500);
   });
 });
 
@@ -355,12 +360,32 @@ function shortcutKey(process: ProcessWindow, node: UiNode) {
   return `${process.hwnd}:${node.id}`;
 }
 
-async function captureHotkey(event: KeyboardEvent, item: ShortcutItem) {
+function clearHotkeyDraft(item: ShortcutItem) {
+  hotkeyDraft[item.id] = "";
+}
+
+function captureHotkey(event: KeyboardEvent, item: ShortcutItem) {
   event.preventDefault();
-  event.stopPropagation();
-  const key = normalizeKey(event);
-  if (!key) return;
-  hotkeyDraft[item.id] = key;
+  if (event.repeat) return;
+  const code = event.code;
+  if (!code || code === "Unidentified") return;
+  const modifierCodes = new Set(["ControlLeft", "ControlRight", "ShiftLeft", "ShiftRight", "AltLeft", "AltRight", "MetaLeft", "MetaRight"]);
+  if (modifierCodes.has(code)) return;
+  const current = hotkeyDraft[item.id] ?? "";
+  if (!current) {
+    const parts: string[] = [];
+    if (event.ctrlKey) parts.push("Ctrl");
+    if (event.altKey) parts.push("Alt");
+    if (event.shiftKey) parts.push("Shift");
+    if (event.metaKey) parts.push("Meta");
+    parts.push(code);
+    hotkeyDraft[item.id] = parts.join("+");
+  } else {
+    hotkeyDraft[item.id] = `${current}+${code}`;
+  }
+}
+
+async function saveHotkeyBlur(item: ShortcutItem) {
   await saveHotkey(item);
 }
 
@@ -635,15 +660,16 @@ function displayHotkeyPart(part: string) {
         </button>
       </div>
       <div class="h-[calc(100%-2.75rem)] overflow-auto p-3">
-        <div class="grid grid-cols-[1fr_220px_110px] border border-[#454b54] bg-[#202327] text-xs font-semibold text-slate-300">
+        <div class="grid grid-cols-[1fr_220px_100px_110px] border border-[#454b54] bg-[#202327] text-xs font-semibold text-slate-300">
           <div class="px-3 py-2">元素</div>
           <div class="px-3 py-2">快捷键</div>
+          <div class="px-3 py-2">状态</div>
           <div class="px-3 py-2 text-right">操作</div>
         </div>
         <div
           v-for="item in shortcuts"
           :key="item.id"
-          class="grid grid-cols-[1fr_220px_110px] items-center border-x border-b border-[#454b54] bg-[#24272b] text-xs"
+          class="grid grid-cols-[1fr_220px_100px_110px] items-center border-x border-b border-[#454b54] bg-[#24272b] text-xs"
         >
           <div class="min-w-0 px-3 py-2">
             <div class="truncate text-slate-100">{{ nodeLabel(item.node) }}</div>
@@ -654,11 +680,13 @@ function displayHotkeyPart(part: string) {
               :value="displayHotkey(hotkeyDraft[item.id] ?? '')"
               class="h-8 w-full border border-[#4a5058] bg-[#151719] px-2 outline-none focus:border-sky-500"
               placeholder="点击后按快捷键"
-              readonly
+              @focus="clearHotkeyDraft(item)"
               @keydown="captureHotkey($event, item)"
+              @blur="saveHotkeyBlur(item)"
               @paste.prevent
             />
           </div>
+          <div class="px-3 py-2 text-emerald-300">{{ triggeredItem === item.id ? "触发" : item.status }}</div>
           <div class="flex justify-end gap-1 px-3 py-2">
             <button class="small-button" :disabled="!item.supportsInvoke" @click="invokeShortcut(item)">
               <BadgePlus :size="14" />

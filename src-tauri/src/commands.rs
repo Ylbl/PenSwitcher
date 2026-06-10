@@ -132,9 +132,9 @@ pub fn set_shortcut_membership(
                     enabled: false,
                     supports_invoke: supports,
                     status: if supports {
-                        "可调用".into()
+                        "未绑定".into()
                     } else {
-                        "不支持 Invoke".into()
+                        "无法调用".into()
                     },
                 });
             }
@@ -143,7 +143,7 @@ pub fn set_shortcut_membership(
         }
         persist_shortcuts(&app, &store)?;
     }
-    rebuild_hotkeys(&state, app)?;
+    rebuild_hotkeys(&state)?;
     Ok(state.shortcuts.lock().map_err(lock_err)?.items.clone())
 }
 
@@ -163,7 +163,7 @@ pub fn remove_shortcut(
         store.items.retain(|item| item.id != item_id);
         persist_shortcuts(&app, &store)?;
     }
-    rebuild_hotkeys(&state, app)?;
+    rebuild_hotkeys(&state)?;
     Ok(state.shortcuts.lock().map_err(lock_err)?.items.clone())
 }
 
@@ -187,18 +187,10 @@ pub fn set_shortcut_hotkey(
         }
         if let Some(item) = store.items.iter_mut().find(|item| item.id == item_id) {
             item.hotkey = normalized;
-            item.enabled = !item.hotkey.is_empty() && item.supports_invoke;
-            item.status = if item.enabled {
-                "已监听".into()
-            } else if item.supports_invoke {
-                "未绑定快捷键".into()
-            } else {
-                "不支持 Invoke".into()
-            };
         }
         persist_shortcuts(&app, &store)?;
     }
-    rebuild_hotkeys(&state, app)?;
+    rebuild_hotkeys(&state)?;
     Ok(state.shortcuts.lock().map_err(lock_err)?.items.clone())
 }
 

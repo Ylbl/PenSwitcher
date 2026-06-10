@@ -11,7 +11,7 @@ mod utils;
 mod windows_api;
 
 use crate::{
-    hotkeys::{install_global_handler, rebuild_hotkeys},
+    hotkeys::{rebuild_hotkeys, start_listener},
     logging::init_logging,
     models::ShortcutStore,
     overlay::Overlay,
@@ -48,10 +48,15 @@ pub fn run() {
             });
 
             warm_uia_worker();
-            install_global_handler(app.handle().clone());
+
             let state = app.state::<AppState>();
-            if let Err(error) = rebuild_hotkeys(&state, app.handle().clone()) {
+            if let Err(error) = rebuild_hotkeys(&state) {
                 tracing::error!(%error, "恢复快捷键监听失败");
+            }
+
+            {
+                let registry = state.hotkeys.lock().map_err(|e| e.to_string())?;
+                start_listener(app.handle().clone(), registry.sequences.clone());
             }
             Ok(())
         })
